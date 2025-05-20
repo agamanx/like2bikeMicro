@@ -36,8 +36,11 @@ Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 unsigned long tiltStartTime = 0;
 bool isTilting = false;
 
+unsigned long lastAccidentSentTime = 0;
+const unsigned long accidentCooldown = 5 * 60 * 100; // 5 minut
+
 // Progi
-#define TILT_THRESHOLD   20
+#define TILT_THRESHOLD   9
 #define TILT_DURATION    5000
 #define HALL_SAMPLE_NUM  5
 #define WHEEL_CIRC_CM    210.0
@@ -132,40 +135,35 @@ void loop() {
   // 💡 Odczyt światła i sterowanie Power LED
   bool isDark = digitalRead(LIGHT_SENSOR_PIN) == HIGH;
   digitalWrite(POWER_LED_PIN, isDark ? HIGH : LOW);
-  Serial.print("Ciemno? ");
-  Serial.println(isDark ? "TAK" : "NIE");
+  //Serial.print("Ciemno? ");
+  //Serial.println(isDark ? "TAK" : "NIE");
 
   // 📈 Przechylenie z akcelerometru
   sensors_event_t event;
   accel.getEvent(&event);
   float tiltAmount = abs(event.acceleration.x) + abs(event.acceleration.y);
+  Serial.println(tiltAmount);
 
 if (tiltAmount > TILT_THRESHOLD) {
   if (!isTilting) {
     isTilting = true;
     tiltStartTime = millis();
   } else if (millis() - tiltStartTime > TILT_DURATION && !awaitingAccidentConfirmation) {
-    bleChar->setValue("POTENCJALNY_WYPADEK");
-    bleChar->notify();
-    tone(BUZZER_PIN, 1500, 1000); // Ostrzeżenie
-    awaitingAccidentConfirmation = true;
-    accidentQueryStart = millis();
+      if (millis() - lastAccidentSentTime > accidentCooldown){
+        Serial.println("Upadek");
+        delay(5000);
+        bleChar->setValue("POTENCJALNY_WYPADEK");
+        bleChar->notify();
+        //tone(BUZZER_PIN, 1500, 1000); // Ostrzeżenie
+        awaitingAccidentConfirmation = true;
+        accidentQueryStart = millis();
+        lastAccidentSentTime = millis();
+    } else {
+      Serial.println("Zbyt szybka ponowna próba wysyłki wypadku.");
+    }
   }
 } else {
   isTilting = false;
-}
-
-if (awaitingAccidentConfirmation) {
-  if (bleCommand == "OK" || bleCommand == "NIE WYPADŁEM") {
-    awaitingAccidentConfirmation = false;
-    bleCommand = "";
-    Serial.println("Wypadek odwołany przez użytkownika.");
-  } else if (millis() - accidentQueryStart > accidentResponseWindow) {
-    bleChar->setValue("WYPADEK_POTWIERDZONY");
-    bleChar->notify();
-    Serial.println("Brak odpowiedzi. Wypadek potwierdzony.");
-    awaitingAccidentConfirmation = false;
-  }
 }
 
   // 🚴 Pomiar prędkości
@@ -173,17 +171,27 @@ if (awaitingAccidentConfirmation) {
   static float speedSamples[HALL_SAMPLE_NUM] = {0};
   static int sampleIndex = 0;
 
-  if (millis() - lastMeasureTime > 2000) {
-    float speed = (hallPulseCount * WHEEL_CIRC_CM) / 2000.0 * 1000.0 / 100.0;
+  if (hallPulseCount >= HALL_SAMPLE_NUM) {
+    unsigned long now = millis();
+    unsigned long duration = now - hallLastTime;
+    hallLastTime = now;
+
+    // Średni czas między impulsami
+    float avgTimePerPulse = duration / (float)hallPulseCount;  // ms
+    float speed = (WHEEL_CIRC_CM / avgTimePerPulse) * 1000.0 / 100.0; // m/s
+
     speedSamples[sampleIndex] = speed;
     sampleIndex = (sampleIndex + 1) % HALL_SAMPLE_NUM;
-    hallPulseCount = 0;
-    lastMeasureTime = millis();
 
+    hallPulseCount = 0;
+
+    // Obliczamy średnią z kilku ostatnich prędkości
     float avg = 0;
     for (int i = 0; i < HALL_SAMPLE_NUM; i++) avg += speedSamples[i];
     avg /= HALL_SAMPLE_NUM;
-    String msg = "Prędkość średnia: " + String(avg) + " m/s";
+
+    String msg = "Prędkość średnia: " + String(avg, 2) + " m/s";
+    Serial.println(msg);
     bleChar->setValue(msg.c_str());
     bleChar->notify();
   }
